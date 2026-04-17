@@ -18,7 +18,7 @@ services:
     name: cuadros-carga-platform
     runtime: python
     region: oregon       # oregon | frankfurt | singapore | ohio
-    plan: starter        # free | starter | standard | pro
+    plan: free           # free | starter | standard | pro
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
     healthCheckPath: /_stcore/health
@@ -31,30 +31,19 @@ services:
           name: cuadros-carga-db
           property: connectionString
 
-      # Almacenamiento — completar con tu proveedor S3/R2/MinIO
+      # Almacenamiento local (gratis, dentro del servidor)
       - key: STORAGE_TYPE
-        value: s3         # Cambiar a r2 para Cloudflare R2 (más económico)
-      - key: S3_BUCKET_NAME
-        value: cuadros-carga
-      - key: AWS_REGION
-        value: sa-east-1  # São Paulo (más cercano a Chile)
+        value: local
+      - key: STORAGE_LOCAL_PATH
+        value: /tmp/uploads
 
-      # Estas deben configurarse manualmente en el dashboard de Render:
-      - key: AWS_ACCESS_KEY_ID
-        sync: false       # No sincronizar desde YAML — ingresar en dashboard
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
       - key: SECRET_KEY
         generateValue: true   # Render genera una clave aleatoria segura
-
-      # Opcional: endpoint para R2 o MinIO
-      # - key: S3_ENDPOINT_URL
-      #   value: https://<account_id>.r2.cloudflarestorage.com
 
   # ── Base de datos PostgreSQL administrada ──────────────────────────────────
 databases:
   - name: cuadros-carga-db
     databaseName: cuadros_carga
     user: ccuser
-    plan: starter         # free (90 días) | starter ($7/mes) | standard ($20/mes)
+    plan: free           # free: gratis por 90 días, luego $7/mes
     region: oregon
