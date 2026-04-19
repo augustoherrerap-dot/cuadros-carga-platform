@@ -1,0 +1,108 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"          # Disparar con: git tag v1.0.0 && git push --tags
+  workflow_dispatch:  # También se puede lanzar manualmente desde GitHub Actions
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Código fuente ───────────────────────────────────────────────────
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Dependencias ────────────────────────────────────────────────────
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # ── 4. Verificar importaciones antes de compilar ───────────────────────
+      - name: Smoke test
+        run: python -c "from core.calculations import calcular_circuito_detallado; print('OK')"
+
+      # ── 5. Compilar .exe con PyInstaller ───────────────────────────────────
+      - name: Build .exe
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "CuadrosDeCargas" `
+            --icon NONE `
+            --add-data "app.py;." `
+            --add-data "core;core" `
+            --add-data "db;db" `
+            --add-data "config;config" `
+            --add-data "storage;storage" `
+            --add-data "pages;pages" `
+            --add-data ".streamlit;.streamlit" `
+            --hidden-import "streamlit" `
+            --hidden-import "streamlit.web.cli" `
+            --hidden-import "streamlit.runtime.scriptrunner" `
+            --hidden-import "sqlalchemy.dialects.sqlite" `
+            --hidden-import "sqlalchemy.dialects.postgresql" `
+            --hidden-import "pydantic_settings" `
+            --hidden-import "openpyxl" `
+            --hidden-import "reportlab" `
+            --hidden-import "pandas" `
+            --collect-all "streamlit" `
+            --collect-all "altair" `
+            --collect-all "pydeck" `
+            launcher.py
+        shell: pwsh
+
+      # ── 6. Verificar que el .exe existe ───────────────────────────────────
+      - name: Verificar artefacto
+        run: |
+          ls dist/
+          echo "Tamaño .exe:"
+          (Get-Item dist/CuadrosDeCargas.exe).Length / 1MB
+        shell: pwsh
+
+      # ── 7. Subir .exe como artefacto descargable ──────────────────────────
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: CuadrosDeCargas-Windows
+          path: dist/CuadrosDeCargas.exe
+          retention-days: 30
+
+      # ── 8. Si es un tag (v*), crear Release automático ────────────────────
+      - name: Crear GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CuadrosDeCargas.exe
+          name: "Cuadros de Carga ${{ github.ref_name }}"
+          body: |
+            ## ⚡ Cuadros de Carga — Alumbrado Público Vial
+
+            ### Instalación
+            1. Descargar `CuadrosDeCargas.exe`
+            2. Doble clic para ejecutar
+            3. Se abre el navegador automáticamente en `http://localhost`
+
+            ### Requisitos
+            - Windows 10 / 11 (64 bits)
+            - No requiere Python instalado
+            - No requiere instalación adicional
+
+            ### Normativa aplicada
+            - SEC RIC-N6 / RIC-10
+            - IEC 60364-4-43 (cortocircuito)
+            - Manual Carreteras MOP (ΔV ≤ 3%)
+          draft: false
+          prerelease: false
