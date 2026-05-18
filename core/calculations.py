@@ -218,6 +218,7 @@ def calcular_circuito_detallado(
     i_cc: float = 1500.0,
     t_prot: float = 0.40,
     seccion_override: float = None,
+    farthest_first: bool = False,
 ) -> dict:
     """
     Cálculo completo de un circuito con:
@@ -229,6 +230,15 @@ def calcular_circuito_detallado(
     if not postes_input:
         return {}
 
+    # Cuando farthest_first=True el orden en postes_input es:
+    #   postes_input[0] = luminaria MÁS ALEJADA del empalme (lum 1)
+    #   postes_input[-1] = luminaria MÁS CERCANA al empalme (lum N)
+    # El motor eléctrico requiere el orden inverso (cercana primero),
+    # ya que i_segmento[i] = Σ I[i:] asume postes[0] = más cercana.
+    # Invertimos antes de calcular y volvemos a invertir al final para display.
+    if farthest_first:
+        postes_input = list(reversed(postes_input))
+
     sigma = COND_AL if material.upper() == "AL" else COND_CU
     n = len(postes_input)
 
@@ -237,7 +247,8 @@ def calcular_circuito_detallado(
     for i, p in enumerate(postes_input):
         post = {
             "numero":          i + 1,
-            "codigo":          f"{id_empalme_num:02d}.{id_circuito:02d}.{i+1:02d}",
+            # Usar código del input si existe (p.ej. importado de Excel)
+            "codigo":          p.get("codigo") or f"{id_empalme_num:02d}.{id_circuito:02d}.{i+1:02d}",
             "interdistancia_m": float(p.get("interdistancia_m", 35.0)),
             "pot_w":            float(p.get("pot_w", 133.0)),
         }
@@ -310,7 +321,12 @@ def calcular_circuito_detallado(
             p["dv_acum_v"]   = round(dv_acum_fase[f], 5)
             p["dv_acum_pct"] = round((dv_acum_fase[f] / V_FASE_3F) * 100, 4)
 
-    # ── 6. Estadísticas del circuito ───────────────────────────────────────────
+    # ── 6. Revertir postes al orden original si farthest_first ───────────────
+    # Esto permite que el display muestre lum 1 (más alejada) primero.
+    if farthest_first:
+        postes = list(reversed(postes))
+
+    # ── 7. Estadísticas del circuito ───────────────────────────────────────────
     pot_total_kw = round(sum(p["pot_w"] for p in postes) / 1000.0, 5)
     dv_max_pct   = max(p["dv_acum_pct"] for p in postes)
     dv_max_v     = max(p["dv_acum_v"]   for p in postes)

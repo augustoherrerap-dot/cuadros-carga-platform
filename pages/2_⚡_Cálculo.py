@@ -101,10 +101,100 @@ def _resize_df(df, new_n, sep, pot, tipo, emp_num, cto_num):
 def _df_to_postes(df):
     return [{"interdistancia_m": float(r["Interdistancia (m)"]),
              "pot_w":            float(r["Potencia (W)"]),
-             "fase":             str(r["Fase"])} for _, r in df.iterrows()]
+             "fase":             str(r["Fase"]),
+             "codigo":           str(r.get("Código", ""))} for _, r in df.iterrows()]
 
 def _secciones_disp(material):
     return SECCIONES_CU if material == "CU" else SECCIONES_AL
+
+
+# ── Importación desde Excel ───────────────────────────────────────────────────
+
+def _cargar_excel_to_session(file_bytes: bytes, idx: int, tipo: str) -> tuple:
+    """
+    Parsea el Excel y carga los circuitos en session_state para el empalme idx.
+    Formato esperado (sin fila de encabezado obligatoria):
+      Col A: Código  (p.ej. 1.1.1  ó  01.01.01)
+      Col B: Potencia 1  (W)
+      Col C: Potencia 2  (W) — gancho doble   [opcional]
+      Col D: Potencia 3  (W) — triple          [opcional]
+      Col E: Interdistancia siguiente (m)
+    Convención: Luminaria 1 = MÁS ALEJADA del empalme.
+    Retorna (n_circuitos, [mensajes])
+    """
+    try:
+        import openpyxl
+        from io import BytesIO
+    except ImportError:
+        return 0, ["❌ openpyxl no disponible — contacta al administrador."]
+
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active
+    except Exception as e:
+        return 0, [f"❌ No se pudo abrir el Excel: {e}"]
+
+    circuits: dict = {}   # {cto_num: [{"lum_n", "pot_w", "interdistancia_m"}]}
+
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        if not row or row[0] is None:
+            continue
+        codigo_raw = str(row[0]).strip().replace(",", ".")
+        try:
+            parts = codigo_raw.split(".")
+            if len(parts) != 3:
+                continue
+            _emp_n, cto_n, lum_n = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+        except (ValueError, IndexError):
+            continue
+
+        p1 = float(row[1]) if len(row) > 1 and row[1] is not None else 0.0
+        p2 = float(row[2]) if len(row) > 2 and row[2] is not None else 0.0
+        p3 = float(row[3]) if len(row) > 3 and row[3] is not None else 0.0
+        inter = float(row[4]) if len(row) > 4 and row[4] is not None else 35.0
+        pot_total = p1 + p2 + p3
+        if pot_total <= 0:
+            continue
+
+        if cto_n not in circuits:
+            circuits[cto_n] = []
+        circuits[cto_n].append({
+            "lum_n":          lum_n,
+            "pot_w":          pot_total,
+            "interdistancia_m": inter,
+        })
+
+    if not circuits:
+        return 0, ["⚠️ No se encontraron filas válidas. "
+                   "Verifica que la Col A tenga códigos (p.ej. 1.1.1) "
+                   "y la Col B tenga potencias > 0."]
+
+    emp_num   = idx + 1
+    cto_keys  = sorted(circuits.keys())
+    n_ctos    = len(cto_keys)
+    msgs      = []
+
+    for ci, cto_n in enumerate(cto_keys):
+        # Ordenar: lum_n ascendente → lum 1 (más alejada) al inicio
+        lums = sorted(circuits[cto_n], key=lambda x: x["lum_n"])
+        n = len(lums)
+        rows = []
+        for i, lum in enumerate(lums):
+            rows.append({
+                "Código":            f"{emp_num:02d}.{cto_n:02d}.{lum['lum_n']:02d}",
+                "Interdistancia (m)": lum["interdistancia_m"],
+                "Potencia (W)":       lum["pot_w"],
+                "Fase":               _fase_auto(i, tipo),
+            })
+        key_df = f"df_{idx}_{ci}"
+        st.session_state[key_df]            = pd.DataFrame(rows)
+        st.session_state[f"nlum_{idx}_{ci}"] = n
+        st.session_state[f"farthest_{idx}_{ci}"] = True
+        msgs.append(f"✅ Cto.{cto_n:02d}: {n} luminarias — "
+                    f"{sum(l['pot_w'] for l in lums):.0f} W totales")
+
+    st.session_state[f"ncto_{idx}"] = n_ctos
+    return n_ctos, msgs
 
 
 # ── Gestión de proyecto activo ────────────────────────────────────────────────
@@ -171,10 +261,11 @@ def _collect_current_data() -> dict:
             df      = st.session_state.get(key_df, pd.DataFrame())
             postes  = _df_to_postes(df) if not df.empty else []
             circuitos_data.append({
-                "cto_num":  cto_num,
-                "material": st.session_state.get(f"mat_{idx}_{ci}", "AL"),
-                "fp":       float(st.session_state.get(f"fp_{idx}_{ci}", FP_DEFAULT)),
-                "postes":   postes,
+                "cto_num":      cto_num,
+                "material":     st.session_state.get(f"mat_{idx}_{ci}", "AL"),
+                "fp":           float(st.session_state.get(f"fp_{idx}_{ci}", FP_DEFAULT)),
+                "postes":       postes,
+                "farthest_first": bool(st.session_state.get(f"farthest_{idx}_{ci}", False)),
             })
         empalmes_data.append({
             "emp_id":      st.session_state.get(f"eid_{idx}", f"E-{emp_num:02d}"),
@@ -260,17 +351,19 @@ def _load_project_data(pobj):
         for ci, cto in enumerate(emp.get("circuitos", [])):
             cto_num = ci + 1
             key_df  = f"df_{idx}_{ci}"
-            st.session_state[f"mat_{idx}_{ci}"] = cto.get("material", "AL")
-            st.session_state[f"fp_{idx}_{ci}"]  = cto.get("fp", FP_DEFAULT)
+            st.session_state[f"mat_{idx}_{ci}"]     = cto.get("material", "AL")
+            st.session_state[f"fp_{idx}_{ci}"]      = cto.get("fp", FP_DEFAULT)
+            st.session_state[f"farthest_{idx}_{ci}"] = cto.get("farthest_first", False)
             postes = cto.get("postes", [])
             if postes:
                 rows = [{
-                    "Código":            f"{emp_num:02d}.{cto_num:02d}.{i+1:02d}",
+                    "Código":            p.get("codigo") or f"{emp_num:02d}.{cto_num:02d}.{i+1:02d}",
                     "Interdistancia (m)": p.get("interdistancia_m", 35.0),
                     "Potencia (W)":       p.get("pot_w", 133.0),
                     "Fase":               p.get("fase", _fase_auto(i, tipo)),
                 } for i, p in enumerate(postes)]
-                st.session_state[key_df] = pd.DataFrame(rows)
+                st.session_state[key_df]              = pd.DataFrame(rows)
+                st.session_state[f"nlum_{idx}_{ci}"] = len(postes)
 
 
 def _export_and_save(file_bytes: bytes, file_type: str, proyecto: dict,
@@ -429,6 +522,47 @@ for idx in range(n_empalmes):
                 help="XLPE: k=143(Cu)/94(Al)  PVC: k=115(Cu)/74(Al) — IEC 60364-4-43",
             )
 
+        # ── Importar desde Excel ──────────────────────────────────────────────
+        with st.expander("📥 Importar luminarias desde Excel", expanded=False):
+            st.markdown("""
+**Formato de columnas (sin encabezado requerido):**
+
+| Col A | Col B | Col C | Col D | Col E |
+|---|---|---|---|---|
+| Código `1.1.1` | P1 (W) | P2 (W) *gancho doble* | P3 (W) *triple* | Interdistancia (m) |
+
+> 🔢 **Lum. 1 = más alejada** del empalme · Lum. N = más cercana
+> 🔌 **Gancho doble/triple:** suma P1+P2+P3 automáticamente
+> 🗂️ Múltiples circuitos (segundo dígito) se crean como pestañas separadas
+""")
+            xl_file = st.file_uploader(
+                "Seleccionar archivo Excel (.xlsx)",
+                type=["xlsx"], key=f"xl_uploader_{idx}",
+                label_visibility="collapsed",
+            )
+            if xl_file is not None:
+                if st.button(f"⬆️ Importar circuitos en Empalme {emp_num:02d}",
+                             key=f"xl_btn_{idx}", type="primary"):
+                    n_imp, msgs_imp = _cargar_excel_to_session(
+                        xl_file.read(), idx, tipo)
+                    if n_imp:
+                        for m in msgs_imp:
+                            st.success(m)
+                        st.info(f"📋 Se cargaron {n_imp} circuito(s). "
+                                "Ajusta el 'N° circuitos' si es necesario y presiona Calcular.")
+                        st.rerun()
+                    else:
+                        for m in msgs_imp:
+                            st.warning(m)
+
+        # Indicar convención activa
+        any_farthest = any(
+            st.session_state.get(f"farthest_{idx}_{ci}", False)
+            for ci in range(n_ctos)
+        )
+        if any_farthest:
+            st.info("📌 **Convención Excel activa:** Lum.01 = más alejada del empalme  |  Lum.N = más cercana")
+
         # ── Circuitos ─────────────────────────────────────────────────────────
         for ci in range(n_ctos):
             cto_num = ci + 1
@@ -542,6 +676,7 @@ for idx in range(n_empalmes):
                 df_cto = st.session_state.get(key_df, pd.DataFrame())
                 if df_cto.empty:
                     continue
+                farthest_k = bool(st.session_state.get(f"farthest_{idx}_{ci}", False))
                 res = calcular_circuito_detallado(
                     id_empalme_num=emp_num,
                     id_circuito=cto_num,
@@ -553,6 +688,7 @@ for idx in range(n_empalmes):
                     i_cc=i_cc_emp,
                     t_prot=t_prot_emp,
                     seccion_override=sec_ov_k,
+                    farthest_first=farthest_k,
                 )
                 circuitos_res.append(res)
 
